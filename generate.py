@@ -48,7 +48,14 @@ def generate(
         """
         logits = model(idx_cond)          # [batch_size, seq_len, vocab_size]
         logits = logits[:, -1, :]          # 取最后一个 timestep: [batch_size, vocab_size]
-
+        """
+        logits是模型输出的原始分数，未归一化，通过除以temperature来调整分布
+        temperature > 1 分布变得更平潭/均匀，更高随机性
+        temperature < 1 分布变得更尖锐/确定性，更低随机性
+        假设模型对下一个词的打分是 [3.0, 1.0, 0.5]（"猫"最高）
+        除以 0.5：[6.0, 2.0, 1.0] → softmax 后"猫"的概率更接近 1.0（更确定）
+        除以 2.0：[1.5, 0.5, 0.25] → softmax 后概率更分散（更随机）
+        """
         # Temperature 采样
         logits = logits / temperature
 

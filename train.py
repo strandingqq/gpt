@@ -14,7 +14,7 @@ from data import build_dataset, get_dataloaders
 class TrainConfig:
     # 数据
     data_path: str = "data/hongloumeng.txt"
-    block_size: int = 256
+    block_size: int = 256 # 每个样本的 token 序列长度（即模型的上下文窗口大小）
     train_split: float = 0.9
     batch_size: int = 64
 
@@ -48,7 +48,12 @@ def load_data(cfg: TrainConfig):
 
 
 def get_lr(step: int, cfg: TrainConfig):
-    """Cosine decay with warmup learning rate schedule."""
+    """
+    warmup机制 在前期小 随着step逐渐增大到lr
+    Cosine decay 
+    progress是0（warmup结束时) 到1 训练结束时的进度比例
+    让学习率 从lr减少到0 
+    """
     if step < cfg.warmup_steps:
         return cfg.lr * step / cfg.warmup_steps
     progress = (step - cfg.warmup_steps) / (cfg.eval_interval * cfg.epochs - cfg.warmup_steps)
@@ -64,7 +69,16 @@ def evaluate(model: nn.Module, val_loader, device: str):
     for x, y in val_loader:
         x, y = x.to(device), y.to(device)
         logits = model(x)
-        loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+        loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), 
+                                            y.view(-1))
+        """
+        .view()：改变形状（类似 reshape）
+        -1：自动推断剩余维度
+        [B, T, vocab] → [B*T, vocab] 
+        [B, T] → [B*T]
+
+        flatten是因为cross_entropy 期望输入logits: [N, C]，target: [N]
+        """
         total_loss += loss.item() * x.size(0)
         count += x.size(0)
     avg_loss = total_loss / count
@@ -74,7 +88,9 @@ def evaluate(model: nn.Module, val_loader, device: str):
 
 
 def decode_sample(itos, token_ids: torch.Tensor):
-    """将 token id 序列解码为字符串。"""
+    """将 token id 序列解码为字符串。
+    i.item() 将pytorch张量中的单个标量转为int
+    """
     return "".join(itos[i.item()] for i in token_ids)
 
 
@@ -103,6 +119,10 @@ def train(cfg: TrainConfig):
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
     )
+    """
+    LambdaLR: 使用一个lambda函数来计算学习率，这个函数接受一个step参数，返回一个学习率
+    学习使用不同lr调度
+    """
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda step: get_lr(step, cfg))
 
     # 训练循环
@@ -120,6 +140,9 @@ def train(cfg: TrainConfig):
 
             optimizer.zero_grad()
             loss.backward()
+            """
+            梯度裁剪 将所有参数的梯度范数裁剪到最大1.0 防止梯度爆炸
+            """
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             scheduler.step()
