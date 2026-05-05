@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 import math
-from einops import rearrange
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -45,11 +44,12 @@ def scaled_dot_product_attention(
     -inf 是为了softmax - 0 
     """
     d_k = Q.size(-1)
-    scores = torch.einsum('..nk, ..mk -> ..nm',Q,K) / math.sqrt(d_k)
+    scores = torch.einsum('bhnd,bhmd->bhnm', Q, K) / math.sqrt(d_k)
     if mask is not None:
-        scores = scores.masked_fill(~mask, float('-inf'))
-    probs = softmax(scores, dim = -1)
-    output = torch.einsum('..nm , ..mk',probs,V)
+        mask_expanded = mask.unsqueeze(0).unsqueeze(0)   # [T,T] -> [1,1,T,T]
+        scores = scores.masked_fill(mask_expanded == False, float('-inf'))
+    probs = softmax(scores, dim=-1)
+    output = torch.einsum('bhnm,bhmd->bhnd', probs, V)
     return output
 
 class CasualSelfAttention(nn.Module):
@@ -74,16 +74,26 @@ class CasualSelfAttention(nn.Module):
         self.k_proj = nn.Linear(d_model,d_model,device=device,dtype=dtype)
         self.v_proj = nn.Linear(d_model,d_model,device=device,dtype=dtype)
         self.output_proj = nn.Linear(d_model,d_model,device=device,dtype=dtype)
+        self.register_buffer(
+            "causal_mask",
+            torch.tril(torch.ones(max_seq_len, max_seq_len, device=device, dtype=torch.bool)),
+            persistent=False,
+        )
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
-        q = rearrange(self.q_proj(x),'a b (c d) -> a c b d', c = self.num_heads)
-        k = rearrange(self.k_proj(x),'a b (c d) -> a c b d', c=self.num_heads)
-        v = rearrange(self.v_proj(x),'a b (c d) -> a c b d', c=self.num_heads)
+        B, T, _ = x.shape
+        if T > self.max_seq_len:
+            raise ValueError(f"sequence length {T} exceeds max_seq_len {self.max_seq_len}")
+
+        q = self.q_proj(x).view(B, T, self.num_heads, self.d_k).transpose(1, 2)
+        k = self.k_proj(x).view(B, T, self.num_heads, self.d_k).transpose(1, 2)
+        v = self.v_proj(x).view(B, T, self.num_heads, self.d_k).transpose(1, 2)
         # q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        
-        mask = torch.tril(torch.ones(self.max_seq_len, self.max_seq_len, device=x.device))
+
+        mask = self.causal_mask[:T, :T]
         attention_out = scaled_dot_product_attention(q,k,v,mask=mask)
-        attn_out = rearrange(attention_out,'a b c d -> a c (b d)')
+        # attn_out = rearrange(attention_out,'a c b d -> a c (b d)')
+        attn_out = attention_out.transpose(1, 2).reshape(B, T, self.d_model)
         return self.output_proj(attn_out)
 
 
@@ -148,7 +158,8 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.ln1 = nn.LayerNorm(d_model,device=device,dtype=dtype)
         self.ln2 = nn.LayerNorm(d_model,device=device,dtype=dtype)
-        self.ffn = FeedForward(d_model,d_ff,device=device,dtype=dtype)
+        #self.ffn = FeedForward(d_model,d_ff,device=device,dtype=dtype)
+        self.ffn = SwiGLUFeedForward(d_model, d_ff, device=device, dtype=dtype)
         self.attn = CasualSelfAttention(num_heads,d_model,max_seq_len,device=device,dtype=dtype)
     def forward(self,x:torch.Tensor)->torch.Tensor:
         x = x + self.attn(self.ln1(x))
@@ -190,7 +201,7 @@ class LayerNorm(nn.Module):
         在完成标准化之后恢复模型的表达能力
 
         """
-        mean = x.mean(dim = -1, keep_dim = True)
+        mean = x.mean(dim=-1, keepdim=True)
         var = x.var(dim = -1, keepdim = True, unbiased=False)
         x_normed = (x - mean) / torch.sqrt(var+self.eps)
         out = self.gamma * x_normed + self.bias
@@ -212,8 +223,8 @@ class GPT(nn.Module):
         而位置emb的表是一张包含所有token位置信息的位置索引表
         """
         self.context_length = context_length
-        self.token_embedding = nn.Embedding(vocab_size = vocab_size, embedding_dim = d_model)
-        self.pos_embedding = nn.Embedding(vocab_size = context_length, embedding_dim = d_model)
+        self.token_embedding = nn.Embedding(num_embeddings=vocab_size, embedding_dim=d_model)
+        self.pos_embedding = nn.Embedding(num_embeddings = context_length, embedding_dim = d_model)
         self.blocks = nn.ModuleList([
             TransformerBlock(d_model,num_heads,d_ff,context_length,device=device,dtype=dtype)
             for _ in range(num_layers)

@@ -2,6 +2,36 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 
 
+ALLOWED_PUNCTUATION = set(
+    "\n\r\t 　，。！？；：、（）《》【】“”‘’\"'…—-·,.!?;:"
+)
+ALLOWED_EXTRA_CHARS = set("0123456789一二三四五六七八九十百千万零〇")
+
+
+def clean_text(text: str) -> str:
+    """Normalize the source text and remove rare non-Chinese noise chars."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("`", "’").replace("＂", "”").replace("＇", "’")
+
+    cleaned_chars = []
+    previous_newline = False
+    for ch in text:
+        is_chinese = "\u4e00" <= ch <= "\u9fff"
+        keep = is_chinese or ch in ALLOWED_PUNCTUATION or ch in ALLOWED_EXTRA_CHARS
+        if not keep:
+            continue
+
+        if ch == "\n":
+            if previous_newline:
+                continue
+            previous_newline = True
+        elif ch not in {" ", "　", "\t"}:
+            previous_newline = False
+        cleaned_chars.append(ch)
+
+    return "".join(cleaned_chars).strip()
+
+
 class TextDataset(Dataset):
     """
     字符级文本数据集。
@@ -34,6 +64,7 @@ def build_dataset(
     text: str,
     block_size: int = 256,
     train_split: float = 0.9,
+    clean: bool = True,
 ):
     """
     将原始文本转换为 token id 列表，划分训练集/验证集，返回 Dataset 对象。
@@ -52,6 +83,9 @@ def build_dataset(
 
     """
     # 字符级分词：每个汉字作为一个 token
+    if clean:
+        text = clean_text(text)
+
     chars = sorted(set(text))
     vocab_size = len(chars)
     stoi = {ch: i for i, ch in enumerate(chars)}
@@ -115,6 +149,7 @@ if __name__ == "__main__":
     train_ds, val_ds, stoi, itos, vocab_size = build_dataset(text, block_size=64)
 
     print(f"词表大小: {vocab_size}")
+    print(f"cleaned chars: {len(clean_text(text))} / raw chars: {len(text)}")
     print(f"训练样本数: {len(train_ds)}")
     print(f"验证样本数: {len(val_ds)}")
 
